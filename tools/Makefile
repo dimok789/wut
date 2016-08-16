@@ -1,6 +1,6 @@
 .SUFFIXES:
 
-TARGETS := elf2rpl readrpl
+TARGETS := elf2rpl readrpl genrplstub
 
 ifeq ($(OS),Windows_NT)
 all:
@@ -26,6 +26,7 @@ install: all
 
 else
 all:
+	@mkdir -p bin
 	@for dir in $(TARGETS); do \
 		echo; \
 		echo Entering Directory $$dir; \

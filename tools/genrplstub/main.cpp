@@ -1,35 +1,44 @@
 #include <array>
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <cstdint>
+#include <iostream>
+#include <functional>
 #include <fstream>
+#include <locale>
 #include <vector>
 #include <string>
-#include <iostream>
-#include <algorithm>
-#include <functional>
-#include <cctype>
-#include <locale>
-#include <cstdint>
 #include <zlib.h>
 
 // trim from start
-static inline std::string &ltrim(std::string &s) {
+static inline std::string &
+ltrim(std::string &s)
+{
    s.erase(s.begin(), std::find_if(s.begin(), s.end(),
       std::not1(std::ptr_fun<int, int>(std::isspace))));
    return s;
 }
 
 // trim from end
-static inline std::string &rtrim(std::string &s) {
+static inline std::string &
+rtrim(std::string &s)
+{
    s.erase(std::find_if(s.rbegin(), s.rend(),
       std::not1(std::ptr_fun<int, int>(std::isspace))).base(), s.end());
    return s;
 }
 
 // trim from both ends
-static inline std::string &trim(std::string &s) {
+static inline std::string &
+trim(std::string &s)
+{
    return ltrim(rtrim(s));
 }
 
-uint32_t byte_swap(uint32_t v) {
+uint32_t
+byte_swap(uint32_t v)
+{
    return ((v >> 24) & 0xff) |
       ((v << 8) & 0xff0000) |
       ((v >> 8) & 0xff00) |
@@ -43,7 +52,11 @@ enum class ReadMode
    DATA
 };
 
-void writeExports(std::ofstream &out, std::string moduleName, int type, std::vector<std::string> exports)
+void
+writeExports(std::ofstream &out,
+             const std::string &moduleName,
+             int type,
+             const std::vector<std::string> &exports)
 {
    // Align module name up to 8 bytes
    auto moduleNameSize = (moduleName.length() + 1 + 7) & ~7;

@@ -4,7 +4,7 @@ else
 WUT_ROOT := $(CURDIR)
 endif
 
-TARGETS := crt rpl tools
+TARGETS := tools crt rpl
 
 export WUT_ROOT
 

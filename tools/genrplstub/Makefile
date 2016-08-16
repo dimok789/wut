@@ -1,4 +1,4 @@
-TARGET   := ../bin/elf2rpl
+TARGET   := ../bin/genrplstub
 SOURCE   := .
 INCLUDE  := ../common
 
