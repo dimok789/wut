@@ -1,6 +1,5 @@
 .SUFFIXES:
 
-WUT_ROOT := $(CURDIR)/..
 TARGETS := elf2rpl readrpl
 
 ifeq ($(OS),Windows_NT)
@@ -19,10 +18,10 @@ else
 endif
 
 install: all
-	@mkdir -p $(WUT_ROOT)/bin
+	@mkdir -p ../bin
 	@for dir in $(TARGETS); do \
 		echo Installing $$dir; \
-		cp bin/$$dir $(WUT_ROOT)/bin; \
+		cp bin/$$dir ../bin; \
 	done
 
 else
@@ -41,10 +40,10 @@ clean:
 	done
 
 install: all
-	@mkdir -p $(WUT_ROOT)/bin
+	@mkdir -p ../bin
 	@for dir in $(TARGETS); do \
 		echo Installing $$dir; \
-		cp $$dir/$$dir $(WUT_ROOT)/bin; \
+		cp $$dir/$$dir ../bin; \
 	done
 endif
 

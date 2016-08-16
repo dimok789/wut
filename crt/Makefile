@@ -1,10 +1,10 @@
 include $(CURDIR)/../rules/ppc.mk
 
-WUT_ROOT := $(CURDIR)/..
 CFILES  := $(wildcard *.c)
 SFILES  := $(wildcard *.S)
 OFILES  := $(CFILES:.c=.o) $(SFILES:.S=.o)
 OUTPUT  := libcrt
+CFLAGS  += -O2 -Wall -std=c11 -I$(WUT_ROOT)/include
 
 all: $(OUTPUT).a $(OFILES)
 
@@ -13,12 +13,8 @@ clean:
 	@rm -f $(OFILES) $(OUTPUT).a
 
 install: all
-	@mkdir -p $(WUT_ROOT)/lib
-	@cp -f *.a $(WUT_ROOT)/lib
-
-%.o: %.S
-	@echo "[CC]  $(notdir $<)"
-	@$(CC) $(CFLAGS) -c $< -o $@
+	@mkdir -p ../lib
+	@cp -f *.a ../lib
 
 $(OUTPUT).a: $(OFILES)
 

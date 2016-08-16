@@ -1,7 +1,3 @@
-ifeq ($(strip $(DEVKITPRO)),)
-$(error "Please ensure DEVKITPRO is in your environment.")
-endif
-
 ifeq ($(strip $(DEVKITPPC)),)
 $(error "Please ensure DEVKITPPC is in your environment.")
 endif

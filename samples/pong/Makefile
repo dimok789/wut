@@ -4,7 +4,7 @@ ifeq ($(strip $(WUT_ROOT)),)
 $(error "Please ensure WUT_ROOT is in your environment.")
 endif
 
-ifeq ($(shell uname -s),CYGWIN*)
+ifeq ($(findstring CYGWIN,$(shell uname -s)),CYGWIN)
 ROOT := $(shell cygpath -w ${CURDIR})
 WUT_ROOT := $(shell cygpath -w ${WUT_ROOT})
 else
@@ -18,7 +18,7 @@ BUILD    := build
 SOURCE   := src
 INCLUDE  := include
 DATA     := data
-LIBS     := -lgcc -lcrt -lcoreinit -lvpad -lproc_ui
+LIBS     := -lgcc -lvpad -lproc_ui
 
 CFLAGS   += -O2 -Wall -std=c11
 CXXFLAGS += -O2 -Wall

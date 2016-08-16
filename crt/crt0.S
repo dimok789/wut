@@ -1,3 +1,12 @@
+.section .syscall, "ax"
+.align 0
+
+.global __dotsyscall
+__dotsyscall:
+	nop
+	blr
+
+.section .text
 .extern main
 .extern exit
 .global _start

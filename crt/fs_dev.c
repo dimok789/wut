@@ -862,8 +862,6 @@ fs_statvfs(struct _reent *r,
            const char *path,
            struct statvfs *buf)
 {
-   FSStatus rc;
-   bool writable = false;
    char *path_fix = fs_fixpath(r, path);
 
    if (!path_fix)  {

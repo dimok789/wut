@@ -4,25 +4,19 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
 #include <memory>
 #include <zlib.h>
 #include "elf.h"
 
-#pragma pack(push, 1)
+static const uint32_t
+CodeAddress = 0x02000000u;
 
-struct RplLibsDef
-{
-   be_val<uint32_t> name;
-   be_val<uint32_t> stubStart;
-   be_val<uint32_t> stubEnd;
-};
+static const uint32_t
+DataAddress = 0x10000000u;
 
-#pragma pack(pop)
-
-static const uint32_t LoadAddress = 0x01000000u;
-static const uint32_t CodeAddress = 0x02000000u;
-static const uint32_t DataAddress = 0x10000000u;
-static const uint32_t WiiuLoadAddress = 0xC0000000u;
+static const uint32_t
+WiiuLoadAddress = 0xC0000000u;
 
 struct ElfFile
 {
@@ -45,6 +39,14 @@ struct ElfFile
       uint32_t addend;
    };
 
+   struct ImportSection
+   {
+      std::string name;
+      uint32_t address;
+      std::vector<char> data;
+      std::vector<Symbol *> imports;
+   };
+
    struct DataSection
    {
       std::string name;
@@ -52,32 +54,18 @@ struct ElfFile
       elf::SectionType type;
       elf::SectionFlags flags;
 
-      // Data used if type == SHT_PROGBITS
+      // Data used if type == SHT_PROGBITS || type == SHT_RPL_IMPORTS
       std::vector<char> data;
 
       // Size used if type == SHT_NOBITS
       uint32_t size;
    };
 
-   struct RplImport
-   {
-      Symbol *trampSymbol;
-      Symbol *stubSymbol;
-      uint32_t stubAddr;
-      uint32_t trampAddr;
-   };
-
-   struct RplImportLibrary
-   {
-      std::string name;
-      std::vector<std::unique_ptr<RplImport>> imports;
-   };
-
    uint32_t entryPoint;
    std::vector<std::unique_ptr<DataSection>> dataSections;
+   std::vector<std::unique_ptr<ImportSection>> importSections;
    std::vector<std::unique_ptr<Symbol>> symbols;
    std::vector<std::unique_ptr<Relocation>> relocations;
-   std::vector<std::unique_ptr<RplImportLibrary>> rplImports;
 };
 
 struct InputSection
@@ -94,7 +82,7 @@ findSymbol(ElfFile &file, uint32_t address)
          return symbol.get();
       }
    }
-   
+
    for (auto &symbol : file.symbols) {
       if (symbol->address == address) {
          return symbol.get();
@@ -104,43 +92,20 @@ findSymbol(ElfFile &file, uint32_t address)
    return nullptr;
 }
 
-static ElfFile::RplImport *
-findImport(ElfFile &file, uint32_t address)
+static ElfFile::ImportSection *
+findImportSection(ElfFile &file, uint32_t addr)
 {
-   for (auto &lib : file.rplImports) {
-      for (auto &import : lib->imports) {
-         if (import->stubAddr == address || import->trampAddr == address) {
-            return import.get();
-         }
+   for (auto &section : file.importSections) {
+      auto start = section->address;
+      auto end = start + section->data.size();
+
+      if (addr >= start && addr < end) {
+         return section.get();
       }
    }
 
    return nullptr;
 }
-
-template<typename Type>
-static Type *
-getLoaderDataPtr(std::vector<InputSection> &inSections, uint32_t address)
-{
-   for (auto &section : inSections) {
-      auto start = section.header.addr;
-      auto end = start + section.data.size();
-
-      if (start <= address && end > address) {
-         auto offset = address - start;
-         return reinterpret_cast<Type *>(section.data.data() + offset);
-      }
-   }
-
-   return nullptr;
-}
-
-static elf::Symbol *
-getSectionSymbol(InputSection &section, size_t index)
-{
-   auto symbols = reinterpret_cast<elf::Symbol *>(section.data.data());
-   return &symbols[index];
-};
 
 static bool
 read(ElfFile &file, const std::string &filename)
@@ -203,74 +168,39 @@ read(ElfFile &file, const std::string &filename)
    }
 
    auto shStrTab = inSections[header.shstrndx].data.data();
-
-   // Process any loader relocations
-   for (auto &section : inSections) {
-      if (section.header.type != elf::SHT_RELA) {
-         continue;
-      }
-
-      auto name = std::string { shStrTab + section.header.name };
-
-      if (name.compare(".rela.dyn") != 0) {
-         continue;
-      }
-
-      auto symSection = inSections[section.header.link];
-      auto relas = reinterpret_cast<elf::Rela *>(section.data.data());
-      auto count = section.data.size() / sizeof(elf::Rela);
-
-      for (auto i = 0u; i < count; ++i) {
-         auto &rela = relas[i];
-         auto index = rela.info >> 8;
-         auto symbol = getSectionSymbol(symSection, index);
-         auto addr = symbol->value + rela.addend;
-
-         auto type = rela.info & 0xff;
-         auto ptr = getLoaderDataPtr<uint32_t>(inSections, rela.offset);
-
-         if (!ptr) {
-            std::cout << "Unexpected relocation offset in .rela.dyn section" << std::endl;
-            return false;
-         }
-
-         switch (type) {
-         case elf::R_PPC_RELATIVE:
-            *ptr = byte_swap(addr);
-            break;
-         default:
-            std::cout << "Unexpected relocation type in .rela.dyn section" << std::endl;
-            return false;
-         }
-      }
-   }
+   auto firstImportSectionAddress = 0u;
 
    // Read text/data sections
-   for (auto &section : inSections) {
-      if (section.header.addr >= LoadAddress && section.header.addr < CodeAddress) {
-         // Skip any load sections
+   for (auto i = 0u; i < inSections.size(); ++i) {
+      auto &section = inSections[i];
+      auto name = std::string { shStrTab + section.header.name };
+
+      if (section.header.type != elf::SHT_PROGBITS && section.header.type != elf::SHT_NOBITS) {
          continue;
       }
 
-      auto name = std::string { shStrTab + section.header.name };
-
-      if (section.header.type == elf::SHT_PROGBITS) {
-         auto data = new ElfFile::DataSection();
-         data->type = elf::SHT_PROGBITS;
-         data->flags = static_cast<elf::SectionFlags>(section.header.flags.value());
+      if (name.compare(0, 8, ".fimport") == 0 || name.compare(0, 8, ".dimport") == 0) {
+         auto data = new ElfFile::ImportSection();
          data->name = shStrTab + section.header.name;
-         data->address = section.header.addr;
          data->data = section.data;
-         file.dataSections.emplace_back(data);
-      } else if (section.header.type == elf::SHT_NOBITS) {
-         auto bss = new ElfFile::DataSection();
-         bss->type = elf::SHT_NOBITS;
-         bss->flags = static_cast<elf::SectionFlags>(section.header.flags.value());
-         bss->name = shStrTab + section.header.name;
-         bss->address = section.header.addr;
-         bss->size = section.header.size;
-         file.dataSections.emplace_back(bss);
+         data->address = section.header.addr;
+         file.importSections.emplace_back(data);
+         continue;
       }
+
+      auto data = new ElfFile::DataSection();
+      data->type = static_cast<elf::SectionType>(section.header.type.value());
+      data->flags = static_cast<elf::SectionFlags>(section.header.flags.value());
+      data->name = shStrTab + section.header.name;
+      data->address = section.header.addr;
+
+      if (section.header.type == elf::SHT_NOBITS) {
+         data->size = section.header.size;
+      } else {
+         data->data = section.data;
+      }
+
+      file.dataSections.emplace_back(data);
    }
 
    // Default symbols
@@ -324,18 +254,17 @@ read(ElfFile &file, const std::string &filename)
 
       for (auto i = 0u; i < count; ++i) {
          auto &sym = symTab[i];
-
-         if (sym.value >= LoadAddress && sym.value < CodeAddress) {
-            // Skip any load symbols
-            continue;
-         }
-
          auto type = static_cast<elf::SymbolType>(sym.info & 0xF);
          auto binding = static_cast<elf::SymbolBinding>((sym.info >> 4) & 0xF);
 
-         if (type == elf::STT_NOTYPE && sym.value == 0) {
-            // Skip null symbol
-            continue;
+         if (type == elf::STT_NOTYPE) {
+            if (sym.value == 0) {
+               // Skip null symbol
+               continue;
+            }
+
+            // Force type to be FUNC
+            type = elf::STT_FUNC;
          }
 
          if (type == elf::STT_FILE || type == elf::STT_SECTION) {
@@ -343,6 +272,7 @@ read(ElfFile &file, const std::string &filename)
             continue;
          }
 
+         // Add symbol
          auto symbol = new ElfFile::Symbol();
          symbol->name = strTab + sym.name;
          symbol->address = sym.value;
@@ -350,50 +280,11 @@ read(ElfFile &file, const std::string &filename)
          symbol->type = type;
          symbol->binding = binding;
          file.symbols.emplace_back(symbol);
-      }
-   }
 
-   // Read RPL imports
-   for (auto &section : inSections) {
-      auto name = std::string { shStrTab + section.header.name };
-
-      if (name.compare(".lib.rplLibs") != 0) {
-         continue;
-      }
-
-      auto rplTab = reinterpret_cast<RplLibsDef *>(section.data.data());
-      auto count = section.data.size() / sizeof(RplLibsDef);
-
-      for (auto i = 0u; i < count; ++i) {
-         auto &rpl = rplTab[i];
-         auto lib = new ElfFile::RplImportLibrary();
-         lib->name = getLoaderDataPtr<char>(inSections, rpl.name);
-
-         for (auto stubAddr = rpl.stubStart; stubAddr < rpl.stubEnd; stubAddr += 4) {
-            auto import = new ElfFile::RplImport();
-            import->trampAddr = byte_swap(*getLoaderDataPtr<uint32_t>(inSections, stubAddr));
-            import->stubAddr = stubAddr;
-
-            // Get the tramp symbol
-            import->trampSymbol = findSymbol(file, import->trampAddr);
-
-            // Create a new symbol to use for the import
-            auto stubSymbol = new ElfFile::Symbol();
-            import->stubSymbol = stubSymbol;
-            stubSymbol->name = import->trampSymbol->name;
-            stubSymbol->address = 0;
-            stubSymbol->size = 0;
-            stubSymbol->binding = elf::STB_GLOBAL;
-            stubSymbol->type = elf::STT_FUNC;
-            file.symbols.emplace_back(stubSymbol);
-
-            // Rename tramp symbol
-            import->trampSymbol->name += "_tramp";
-
-            lib->imports.emplace_back(import);
+         // If the symbol is in an import section, add it to the imports lists!
+         if (auto importSection = findImportSection(file, sym.value)) {
+            importSection->imports.push_back(symbol);
          }
-
-         file.rplImports.emplace_back(lib);
       }
    }
 
@@ -404,12 +295,6 @@ read(ElfFile &file, const std::string &filename)
       }
 
       auto name = std::string { shStrTab + section.header.name };
-
-      if (name.compare(".rela.dyn") == 0) {
-         // Skip dyn relocations
-         continue;
-      }
-
       auto symTab = reinterpret_cast<elf::Symbol *>(inSections[section.header.link].data.data());
       auto relTab = reinterpret_cast<elf::Rela *>(section.data.data());
       auto count = section.data.size() / sizeof(elf::Rela);
@@ -430,96 +315,17 @@ read(ElfFile &file, const std::string &filename)
             }
          }
 
-         auto addend = static_cast<uint32_t>(rela.addend);
-
-         if (auto import = findImport(file, addend)) {
-            relocation->symbol = import->stubSymbol;
-            relocation->addend = 0;
-         } else if (auto symbol = findSymbol(file, addend)) {
+         if (auto symbol = findSymbol(file, sym.value)) {
             relocation->symbol = symbol;
-            relocation->addend = 0;
-         } else if (addend >= DataAddress && addend < WiiuLoadAddress) {
-            relocation->symbol = findSymbol(file, DataAddress);
-            relocation->addend = addend - DataAddress;
+            relocation->addend = rela.addend;
          } else {
-            // If we can't find a proper symbol, write the addend in and hope for the best
-            auto ptr = getLoaderDataPtr<uint32_t>(inSections, rela.offset);
-            *ptr = addend;
-            
-            std::cout << "Unexpected addend " << std::hex << addend << " referenced in relocation section " << name << ", continuing." << std::endl;
-            continue;
-         }
-
-         relocation->target = rela.offset;
-         relocation->type = static_cast<elf::RelocationType>(type);
-         file.relocations.emplace_back(relocation);
-      }
-   }
-   
-   // Read dyn relocations
-   for (auto &section : inSections) {
-      if (section.header.type != elf::SHT_RELA) {
-         continue;
-      }
-
-      auto name = std::string { shStrTab + section.header.name };
-
-      if (name.compare(".rela.dyn") != 0) {
-         continue;
-      }
-
-      auto symSection = inSections[section.header.link];
-      auto relas = reinterpret_cast<elf::Rela *>(section.data.data());
-      auto count = section.data.size() / sizeof(elf::Rela);
-
-      for (auto i = 0u; i < count; ++i) {
-         auto relocation = new ElfFile::Relocation();
-         auto &rela = relas[i];
-
-         auto type = rela.info & 0xff;
-         auto index = rela.info >> 8;
-         auto symbol = getSectionSymbol(symSection, index);
-         auto addr = symbol->value + rela.addend;
-
-         if(index == 0)
-         {
-            auto addend = static_cast<uint32_t>(rela.addend);
-
-             if (auto import = findImport(file, addend)) {
-                relocation->symbol = import->stubSymbol;
-                relocation->addend = 0;
-             } else if (auto symbol = findSymbol(file, addend)) {
-                relocation->symbol = symbol;
-                relocation->addend = 0;
-             } else if (addr >= CodeAddress && addr < DataAddress) {
-               index = 1;
-               relocation->symbol = findSymbol(file, CodeAddress);
-               relocation->addend = rela.addend - CodeAddress;
-            } else if (addr >= DataAddress && addr < WiiuLoadAddress) {
-               index = 2;
-               relocation->symbol = findSymbol(file, DataAddress);
-               relocation->addend = rela.addend - DataAddress;
-            } else {
-               std::cout << "Unexpected symbol address in .rela.dyn section" << std::endl;
-               return false;
-            }
-         }
-
-         switch (type) {
-         case elf::R_PPC_RELATIVE:
-            type = elf::R_PPC_ADDR32;
-            break;
-         default:
-            std::cout << "Unexpected relocation type in .rela.dyn section" << std::endl;
+            std::cout << "Invalid relocation, could not find symbol!" << std::endl;
             return false;
          }
 
          relocation->target = rela.offset;
          relocation->type = static_cast<elf::RelocationType>(type);
-
-         // Scrap any compiler/linker garbage
-         if(relocation->target >= CodeAddress && relocation->target < WiiuLoadAddress)
-            file.relocations.emplace_back(relocation);
+         file.relocations.emplace_back(relocation);
       }
    }
 
@@ -612,7 +418,7 @@ write(ElfFile &file, const std::string &filename)
          out->header.addralign = 4096;
          out->header.flags |= elf::SHF_WRITE; // .rodata needs to be writable?
       } else {
-         out->header.addralign = 256;
+         out->header.addralign = 32;
       }
 
       out->header.entsize = 0;
@@ -664,19 +470,34 @@ write(ElfFile &file, const std::string &filename)
    }
 
    // Calculate sizes of symbol/string tables so RPL imports are placed after them
-   auto loadAddress = 0xC0000000;
-   auto predictStrTabSize = 1;
-   auto predictSymTabSize = 1;
-   auto predictShstrTabSize = 1;
+   auto loadAddress = size_t { 0xC0000000 };
+   auto predictStrTabSize = size_t { 1 };
+   auto predictSymTabSize = size_t { 1 };
+   auto predictShstrTabSize = size_t { 1 };
 
    for (auto &symbol : file.symbols) {
       predictStrTabSize += symbol->name.size() + 1;
       predictSymTabSize += sizeof(elf::Symbol);
    }
 
+   // PROGBITS and NOBITS sections
    for (auto &section : outSections) {
       predictShstrTabSize += section->name.size() + 1;
    }
+
+   // SHT_RPL_IMPORTS sections
+   for (auto &section : file.importSections) {
+      predictShstrTabSize += section->name.size() + 1;
+
+      // Have not created symbols for import section yet, so predict those!
+      predictSymTabSize += sizeof(elf::Symbol);
+      predictStrTabSize += section->name.size() + 1;
+   }
+
+   // Extra sections
+   predictShstrTabSize += strlen(".symtab") + 1;
+   predictShstrTabSize += strlen(".strtab") + 1;
+   predictShstrTabSize += strlen(".shstrtab") + 1;
 
    predictStrTabSize = align_up(predictStrTabSize, 0x10);
    predictSymTabSize = align_up(predictSymTabSize, 0x10);
@@ -684,7 +505,7 @@ write(ElfFile &file, const std::string &filename)
    loadAddress += predictStrTabSize + predictSymTabSize + predictShstrTabSize;
 
    // Create RPL import sections, .fimport_*, .dimport_*
-   for (auto &lib : file.rplImports) {
+   for (auto &lib : file.importSections) {
       auto out = new OutputSection();
       out->header.name = -1;
       out->header.type = elf::SHT_RPL_IMPORTS;
@@ -695,38 +516,19 @@ write(ElfFile &file, const std::string &filename)
       out->header.info = 0;
       out->header.addralign = 4;
       out->header.entsize = 0;
-      out->name = ".fimport_" + lib->name;
-
-      // Calculate size
-      auto nameSize = align_up(8 + lib->name.size(), 8);
-      auto stubSize = 8 + 8 * lib->imports.size();
-      out->header.size = std::max(nameSize, stubSize);
-      out->data.resize(out->header.size);
-
-      // Setup data
-      auto imports = reinterpret_cast<elf::RplImport*>(out->data.data());
-      imports->count = lib->imports.size();
-      imports->signature = crc32(0, Z_NULL, 0);
-      memcpy(imports->name, lib->name.data(), lib->name.size());
-      imports->name[lib->name.size()] = 0;
+      out->header.size = lib->data.size();
+      out->name = lib->name;
+      out->data = lib->data;
 
       // Update address of import symbols
       for (auto i = 0u; i < lib->imports.size(); ++i) {
-         lib->imports[i]->stubSymbol->address = loadAddress + 8 + i * 8;
+         lib->imports[i]->address = static_cast<uint32_t>(loadAddress + 8 + i * 8);
       }
 
       loadAddress = align_up(loadAddress + out->header.size, 4);
 
       // Add section
       sectionSymbolItr = addSection(file, outSections, sectionSymbolItr, out);
-   }
-
-   // Prune out unneeded symbols
-   for (auto i = 0u; i < file.symbols.size(); ++i) {
-      if (!file.symbols[i]->name.empty() && file.symbols[i]->type == elf::STT_NOTYPE && file.symbols[i]->size == 0) {
-         file.symbols.erase(file.symbols.begin() + i);
-         i--;
-      }
    }
 
    // NOTICE: FROM NOW ON DO NOT MODIFY mSymbols
@@ -782,7 +584,7 @@ write(ElfFile &file, const std::string &filename)
 
       if(relocation->type == elf::R_PPC_RELATIVE) {
          rela.info = elf::R_PPC_ADDR32 | idx << 8;
-      } 
+      }
 
       rela.addend = relocation->addend;
       rela.offset = relocation->target;
@@ -883,27 +685,10 @@ write(ElfFile &file, const std::string &filename)
       sym.other = 0;
       sym.shndx = shndx;
 
-      //Compound symbol crc into section crc
-      auto crcSection = outSections[shndx];
-      if(crcSection->header.type == elf::SHT_RPL_IMPORTS && symbol->type != elf::STT_SECTION) {
-         auto rplImport = reinterpret_cast<elf::RplImport*>(crcSection->data.data());
-         rplImport->signature = crc32(rplImport->signature, reinterpret_cast<Bytef *>(strTabSection->data.data() + sym.name),strlen(strTabSection->data.data() + sym.name)+1);
-      }
-
       // Append to symtab data
       char *symData = reinterpret_cast<char *>(&sym);
       symTabSection->data.insert(symTabSection->data.end(), symData, symData + sizeof(elf::Symbol));
    }
-   
-   //Finish SHT_RPL_IMPORTS signatures
-   Bytef *zero_buffer = reinterpret_cast<Bytef *>(calloc(0x10, 1));
-   for (auto &section : outSections) {
-      if(section->header.type == elf::SHT_RPL_IMPORTS) {
-         auto rplImport = reinterpret_cast<elf::RplImport*>(section->data.data());
-         rplImport->signature = crc32(rplImport->signature, zero_buffer, 0xE);
-      }
-   }
-   free(zero_buffer);
 
    // Create .shstrtab
    shStrTabSection->header.name = 0;
@@ -985,6 +770,10 @@ write(ElfFile &file, const std::string &filename)
    fileInfo.tagOffset = 0;
 
    // Count file info textSize, dataSize, loadSize
+   auto codeStart = size_t { 0u }; auto codeEnd = size_t { 0u };
+   auto dataStart = size_t { 0u }; auto dataEnd = size_t { 0u };
+   auto loadStart = size_t { 0u }; auto loadEnd = size_t { 0u };
+
    for (auto &section : outSections) {
       auto size = section->data.size();
 
@@ -992,25 +781,41 @@ write(ElfFile &file, const std::string &filename)
          size = section->header.size;
       }
 
+      auto start = section->header.addr.value();
+      auto end = start + size;
+
       if (section->header.addr >= CodeAddress && section->header.addr < DataAddress) {
-         auto val = section->header.addr.value() + section->header.size.value() - CodeAddress;
-         if(val > fileInfo.textSize) {
-            fileInfo.textSize = val;
+         if (codeStart == 0 || start < codeStart) {
+            codeStart = start;
+         }
+
+         if (codeEnd == 0 || end > codeEnd) {
+            codeEnd = end;
          }
       } else if (section->header.addr >= DataAddress && section->header.addr < WiiuLoadAddress) {
-         auto val = section->header.addr.value() + section->header.size.value() - DataAddress;
-         if(val > fileInfo.dataSize) {
-            fileInfo.dataSize = val;
+         if (dataStart == 0 || start < dataStart) {
+            dataStart = start;
+         }
+
+         if (dataEnd == 0 || end > dataEnd) {
+            dataEnd = end;
          }
       } else if (section->header.addr >= WiiuLoadAddress) {
-         auto val = section->header.addr.value() + section->header.size.value() - WiiuLoadAddress;
-         if(val > fileInfo.loadSize) {
-            fileInfo.loadSize = val;
+         if (loadStart == 0 || start < loadStart) {
+            loadStart = start;
+         }
+
+         if (loadEnd == 0 || end > loadEnd) {
+            loadEnd = end;
          }
       } else if (section->header.addr == 0 && section->header.type != elf::SHT_RPL_CRCS && section->header.type != elf::SHT_RPL_FILEINFO) {
          fileInfo.tempSize += (size + 128);
       }
    }
+
+   fileInfo.textSize = static_cast<uint32_t>(codeEnd - codeStart);
+   fileInfo.dataSize = static_cast<uint32_t>(dataEnd - dataStart);
+   fileInfo.loadSize = static_cast<uint32_t>(loadEnd - loadStart);
 
    //TODO: These were calculated based on observation, however some games differ.
    fileInfo.sdaBase = align_up(DataAddress + fileInfo.dataSize + fileInfo.heapSize, 64);
@@ -1060,7 +865,7 @@ write(ElfFile &file, const std::string &filename)
       if (section->header.type != elf::SHT_RPL_CRCS && section->header.type != elf::SHT_RPL_FILEINFO) {
          continue;
       }
-   
+
       if (section->header.type != elf::SHT_NOBITS) {
          section->header.size = section->data.size();
       }
@@ -1072,17 +877,17 @@ write(ElfFile &file, const std::string &filename)
          section->header.offset = 0;
       }
    }
-   
+
    // Add data sections next
    for (auto &section : outSections) {
       if(section->header.offset != -1) {
          continue;
       }
-   
+
       if (section->header.addr < DataAddress || section->header.addr >= WiiuLoadAddress) {
          continue;
       }
-   
+
       if (section->header.type != elf::SHT_NOBITS) {
          section->header.size = section->data.size();
       }
@@ -1094,17 +899,17 @@ write(ElfFile &file, const std::string &filename)
          section->header.offset = 0;
       }
    }
-   
+
    // Add load sections next
    for (auto &section : outSections) {
       if(section->header.offset != -1) {
          continue;
       }
-   
+
       if (section->header.addr < WiiuLoadAddress) {
          continue;
       }
-   
+
       if (section->header.type != elf::SHT_NOBITS) {
          section->header.size = section->data.size();
       }
@@ -1116,13 +921,13 @@ write(ElfFile &file, const std::string &filename)
          section->header.offset = 0;
       }
    }
-   
+
    // Everything else
    for (auto &section : outSections) {
       if(section->header.offset != -1) {
          continue;
       }
-   
+
       if (section->header.type != elf::SHT_NOBITS) {
          section->header.size = section->data.size();
       }

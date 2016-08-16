@@ -1,4 +1,3 @@
-WUT_ROOT := $(CURDIR)/..
 TARGETS := libcoreinit libgx2 libnsysnet libvpad libsysapp libproc_ui
 
 all:
@@ -16,10 +15,10 @@ clean:
 	done
 
 install: all
-	@mkdir -p $(WUT_ROOT)/lib
+	@mkdir -p ../lib
 	@for dir in $(TARGETS); do \
 		echo Installing $$dir; \
-		cp $$dir/*.a $(WUT_ROOT)/lib; \
+		cp $$dir/*.a ../lib; \
 	done
 
 .PHONY: all install clean
